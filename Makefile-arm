@@ -1,0 +1,37 @@
+######################################################
+#Make the dm binfile
+#	time:2025-07-17
+#	author:kay
+#	
+#	
+######################################################
+sh_version := default
+INSTALL_SCRIPT:= dm_install.sh
+CONTENT_TAR_GZ:= dm_install_content_arm.tar.gz
+TGT := ./TargetBin/dm_arm_20231226_INSTALL_$(shell date +%F_%H-%M-%S).bin
+# 记录开始时间
+START_TIME := $(shell date +%s)
+
+#ifdef ver
+	sh_version := ${ver}
+#else
+	sh_version := "default"
+#endif
+
+$(TGT) : $(INSTALL_SCRIPT)  $(CONTENT_TAR_GZ)
+	mkdir -p TargetBin
+	cat $(INSTALL_SCRIPT) $(CONTENT_TAR_GZ) > $@
+	@END_TIME=$$(date +%s); \
+	ELAPSED=$$((END_TIME - $(START_TIME))); \
+	echo "Build completed in $$ELAPSED seconds"
+$(INSTALL_SCRIPT):
+	cp dm_install_$(sh_version).sh $@
+
+
+$(CONTENT_TAR_GZ) :
+	#$(MAKE) -C ./install_content
+	sh  package-arm.sh
+clean :
+	$(RM) $(CONTENT_TAR_GZ) ./TargetBin/dm_arm*
+
+.PHONY : $(TGT) clean
