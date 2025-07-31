@@ -30,11 +30,8 @@ make -f Makefile-arm clean
 生成arm环境的bin包
 make -f Makefile-arm
 ```
-<<<<<<< HEAD
 
-=======
-以上bin包生成目录在TargetBin
->>>>>>> d7d753e (feat: 添加达梦数据库一键安装脚本及相关文件)
+以上执行make之后bin包生成目录在TargetBin
 
 ## 四、如何运行
 使用root账号上传到任意目录比如/opt然后执行sh bin包文件名称
