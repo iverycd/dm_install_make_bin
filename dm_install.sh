@@ -27,10 +27,54 @@ dm_untar_dir=/opt
 dm_root_dir=$dm_untar_dir/dm_all_in_one
 mkdir -p ${dm_root_dir}
 
+# 如果-t指定自定义安装包，对文件进行检查，分别对iso以及bin文件做不同处理
+function check_target_version_path() {
+    if [ ! -z "$target_version" ]; then
+        # 检查文件是否存在
+        if [ -f "$target_version" ]; then
+            echo_color green bold "文件存在: $target_version"
+            
+            # 检查文件后缀
+            if [[ "$target_version" == *.iso ]]; then
+                echo_color yellow bold "检测到ISO文件，准备挂载..."
+                # 执行挂载命令
+                if mount -o loop "$target_version" /mnt; then
+                    echo_color green bold "ISO文件已成功挂载到/mnt"
+                    cp /mnt/DMInstall.bin $dm_root_dir/
+                    umount /mnt
+                else
+                    echo_color red invert "错误: 挂载ISO文件失败"
+                    exit 1
+                fi
+            elif [[ "$target_version" == *.bin ]]; then
+                echo_color yellow bold "检测到BIN文件，准备移动..."
+                # 执行移动命令
+                if mv "$target_version" "$dm_root_dir/DMInstall.bin"; then
+                    echo_color green bold "BIN文件已成功移动到 $dm_root_dir/DMInstall.bin"
+                else
+                    echo_color red invert "错误: 移动BIN文件失败"
+                    exit 1
+                fi
+            else
+                echo_color red invert "错误: 不支持的文件格式: $target_version"
+                exit 1
+            fi
+            return 0
+        else
+            echo_color red invert "错误: 文件不存在或不是常规文件: $target_version"
+            exit 1
+        fi
+    fi
+}
+
 function init_env()
 {
+# 如果没有指定-t参数，即没有指定特定安装包
+if [ -z "$target_version" ]; then
 # 统一安装包名称
 mv $dm_root_dir/DMInstall_*.bin $dm_root_dir/DMInstall.bin
+fi
+
 # 检查用户组是否存在，避免使用黑名单命令 groupadd
 if grep -q '^dinstall:' /etc/group; then
     echo_color yellow bold "警告: dinstall 用户组已存在，跳过创建"
@@ -184,6 +228,11 @@ fi
 
 function unzipfile()
 {
+    # 不为空判断，即指定了-t参数，就直接返回，不运行解压
+    if [ ! -z "$target_version" ]; then
+    echo "你指定了自定义安装包 $target_version"
+    return 1
+    fi
     split_num=`cat -n $0  | grep --text  '\---------ARCHIVE_FOLLOWS---------'| grep -v "split_num" |awk '{printf $1}' `
     tail -n  +$(($split_num+1)) $0  > ${installfilepath}/${INSTALL_TAG_GZ}.tar.gz
     # 执行解压命令
@@ -337,6 +386,20 @@ EOF
     fi
 }
 
+function auto_config()
+{
+    source /root/.bash_profile
+    echo_color blue bold "自动调整数据库参数..."
+    /home/dmdba/dmdbms/bin/disql SYSDBA/SYSDBA@localhost:5236 << EOF
+    SP_SET_PARA_STRING_VALUE(2, 'EXCLUDE_RESERVED_WORDS', 'DOMAIN,XML,EXCHANGE,link');
+    SP_SET_PARA_VALUE(2,'COMPATIBLE_MODE',4);
+    SP_SET_PARA_VALUE(1,'ENABLE_BLOB_CMP_FLAG',1);
+    start /home/dmdba/dmdbms/samples/sql_script/UTF-8/auto_parameter_adjustment.sql
+    /
+    exit;
+EOF
+    echo_color green bold "数据库自动配置完成"
+}
 
 function create_backup_job()
 {
@@ -403,6 +466,12 @@ EOF
    echo_color green bold "/home/dmdba/dmdbms/bin/disql SYSDBA/SYSDBA@localhost:5236 < /tmp/create_job.sql"
 }
 
+
+function restart_db() {
+    echo_color blue bold "正在重启数据库..."
+    systemctl restart DmServiceDMSERVER
+}
+
 function change_pwd() {
     # 使用用户指定的命令生成随机密码
     echo_color blue bold "正在生成随机密码..."
@@ -431,6 +500,8 @@ EOF
     # 显示生成的密码（注意保密）
     echo_color green bold "生成的随机密码: $new_password"
     echo_color yellow bold "请务必记录此密码，它将用于SYSDBA用户登录"
+    echo $new_password > $dm_root_dir/dmpwd.txt
+    echo_color green bold "密码已保存到 $dm_root_dir/dmpwd.txt"
     echo_color yellow bold "请按照顺序执行如下命令:"
     echo_color yellow bold "source /root/.bash_profile"
     echo_color yellow bold "disql SYSDBA/$new_password@localhost:5236"
@@ -449,14 +520,14 @@ do
         pass=$OPTARG
         ;;
     t)
-            echo "we will set the target ip $OPTARG"
-            target_ip=$OPTARG
+            echo "we will install specified dm version $OPTARG"
+            target_version=$OPTARG
             ;;
     h)
         echo -en "you can use follow options: \n"\
              "-p [default 6379]  set the redis port; \n"\
              "-a [default Gepoint] set the redis pass; \n"\
-             "-t set the dm server ip; \n"\
+             "-t install  dm specified version; \n"\
              "-h Help \n"
         exit 1
         ;;
@@ -466,10 +537,11 @@ do
         ;;
     esac
 done
-# if [ -z "$target_ip" ]; then
-#   echo "you must specified -t argument ,example -t 192.168.1.100"
+# if [ -z "$target_version" ]; then
+#   echo "you must specified -t argument ,example -t /opt/DMInstall.bin"
 #   exit 1
 # fi
+check_target_version_path
 print_info
 check_dm_run
 unzipfile
@@ -480,6 +552,8 @@ check_install
 add_run_env
 enable_arch
 create_backup_job
+auto_config
+restart_db
 change_pwd
 exit
 ---------ARCHIVE_FOLLOWS---------
