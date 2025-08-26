@@ -981,7 +981,7 @@ EOF
     echo_color green bold "密码已保存到 $dm_root_dir/dmpwd.txt"
     echo_color yellow bold "请按照顺序执行如下命令:"
     echo_color yellow bold "source /root/.bash_profile"
-    echo_color yellow bold "disql SYSDBA/$new_password@localhost:5236"
+    echo_color yellow bold "disql SYSDBA/$new_password@$dm_host_default:$dm_run_port"
 }
 
 ##############main process##################
