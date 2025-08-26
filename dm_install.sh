@@ -5,9 +5,7 @@
 #
 #
 ######################################################
-#setenforce 0
-#sed  -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/sysconfig/selinux
-#sed  -i 's/SELINUX=enforcing/SELINUX=disabled/g' /etc/selinux/config
+
 COPY='/usr/bin/cp'
 if [[ ! -f ${COPY} ]];then
     COPY='/bin/cp'
@@ -15,24 +13,15 @@ fi
 
 
 # 数据库连接参数
-dm_user_default="SYSDBA"          # 数据库用户名
-dm_password_default="SYSDBA"  # 数据库默认密码
+dm_user_default="SYSDBA"          # 改密码之前的默认数据库用户名
+dm_password_default="SYSDBA"  # 改密码之前的数据库默认密码
 dm_host_default="localhost"        # 数据库主机
-dm_port_default="5236"             # 数据库端口
-dm_disql_path_default="/home/dmdba/dmdbms/bin/disql"  # disql工具路径
-
-# 如果dm_run_port为空，即没有指定参数-p,端口号，就使用默认端口号5236
-if [ -z "$dm_run_port" ]; then
-dm_run_port=$dm_port_default
-fi
-
-# 检查dm_run_port是否为纯数字
-if ! [[ "$dm_run_port" =~ ^[0-9]+$ ]]; then
-    echo "错误: 指定的端口号 '$dm_run_port' 不是有效的数字" >&2
-    echo "请使用 -p 参数指定有效的数字端口号" >&2
-    exit 1
-fi
-
+dm_port_default="5236"             # 默认数据库端口
+dm_bin_default="/home/dmdba/dmdbms/bin" # 默认达梦bin目录
+dm_disql_path_default="/home/dmdba/dmdbms/bin/disql"  # 默认disql工具路径
+dm_data_dir_default="/data" # 默认数据库数据目录
+backup_keep_time_day=7             # 备份保留时间，单位天
+dm_backup_dir_default="/dm_backup"    # 默认备份根目录
 
 # bin包分离出tar包的转储的临时目录
 installfilepath=/tmp/dmtmp
@@ -44,8 +33,35 @@ dm_untar_dir=/opt
 dm_root_dir=$dm_untar_dir/dm_all_in_one
 mkdir -p ${dm_root_dir}
 
-# 如果-t指定自定义安装包，对文件进行检查，分别对iso以及bin文件做不同处理
-function check_target_version_path() {
+
+function echo_color()
+{   
+    nn=""
+    case "$1" in
+        red)    nn="31";;
+        green)  nn="32";;
+        yellow) nn="33";;
+        blue)   nn="34";;
+        purple) nn="35";;
+        cyan)   nn="36";;
+    esac
+    ff=""
+    case "$2" in
+        bold)   ff=";1";;
+        bright) ff=";2";;
+        uscore) ff=";4";;
+        blink)  ff=";5";;
+        invert) ff=";7";;
+    esac
+    color_begin=`echo -e -n "\033[${nn}${ff}m"`
+    color_end=`echo -e -n "\033[0m"`
+    echo $4 "${color_begin}$3${color_end}"
+}
+
+
+# 检查bin包运行时的输入参数
+function check_bin_arguments() {
+    # 检查指定的达梦安装包是否存在,如果-t指定自定义安装包，对文件进行检查，分别对iso以及bin文件做不同处理
     if [ ! -z "$target_version" ]; then
         # 检查文件是否存在
         if [ -f "$target_version" ]; then
@@ -82,6 +98,72 @@ function check_target_version_path() {
             exit 1
         fi
     fi
+
+    # 检查数据库数据目录部分 没有指定-d参数，设置数据库默认数据目录
+    if [ -z "$dm_data_dir" ]; then
+        dm_data_dir=$dm_data_dir_default
+    else
+        # 检查路径结尾是否包含斜杠
+        if [[ "$dm_data_dir" == */ ]]; then
+            echo_color red invert "错误: 数据目录路径 '$dm_data_dir' 不规范，结尾不能包含斜杠" >&2
+            exit 1
+        fi
+        # 检查数据目录是否存在
+        if [ -d "$dm_data_dir" ]; then
+            echo_color green bold "使用的数据目录路径: $dm_data_dir"
+        else
+            echo_color red invert "错误: 数据目录 '$dm_data_dir' 不存在"
+            exit 1
+        fi
+    fi
+
+    # 检查数据库备份目录部分 没有指定-b参数，设置数据库默认备份目录
+    if [ -z "$dm_backup_root_dir" ]; then
+        dm_backup_root_dir=$dm_backup_dir_default
+    else
+        # 检查路径结尾是否包含斜杠
+        if [[ "$dm_backup_root_dir" == */ ]]; then
+            echo_color red invert "错误: 备份目录路径 '$dm_backup_root_dir' 不规范，结尾不能包含斜杠" >&2
+            exit 1
+        fi
+        # 检查备份目录是否存在
+        if [ -d "$dm_backup_root_dir" ]; then
+        echo_color green bold "使用的备份目录路径: $dm_backup_root_dir"
+        else
+        echo_color red invert "错误: 备份目录 '$dm_backup_root_dir' 不存在"
+        exit 1
+        fi
+    fi
+    dm_backup_physical_dir="$dm_backup_root_dir/physical"  # 物理备份目录
+    dm_backup_logical_dir="$dm_backup_root_dir/logical"    # 逻辑备份目录
+
+    # 检查指定的端口部分 如果dm_run_port为空，即没有指定参数-p,端口号，就使用默认端口号5236
+    if [ -z "$dm_run_port" ]; then
+    dm_run_port=$dm_port_default
+    fi
+    # 检查dm_run_port是否为纯数字
+    if ! [[ "$dm_run_port" =~ ^[0-9]+$ ]]; then
+        echo_color red invert "错误: 指定的端口号 '$dm_run_port' 不是有效的数字" >&2
+        echo_color red invert "请使用 -p 参数指定有效的数字端口号" >&2
+        exit 1
+    fi
+
+    # 检查数据库兼容参数部分 设置数据库兼容模式
+    case "$dm_compatible_mode" in
+        "oracle_mode")
+            # 如果指定为oracle_mode或未指定参数，默认使用oracle兼容模式
+            dm_run_compatible_mode=2
+            ;;
+        "mysql_mode"|"")
+            # 如果指定为mysql_mode或未指定参数，默认使用mysql兼容模式
+            dm_run_compatible_mode=4
+            ;;
+        *)
+            # 未知的兼容模式，默认使用mysql兼容模式
+            echo_color red invert "错误: 未知的兼容模式 '$dm_compatible_mode',请指定oracle_mode或mysql_mode"
+            exit 1
+            ;;
+    esac
 }
 
 function init_env()
@@ -138,8 +220,8 @@ export LANG=en_US
 chown dmdba:dinstall $dm_root_dir/DMInstall.bin
 chmod +x $dm_root_dir/DMInstall.bin
 # 创建达梦数据文件目录
-mkdir /data
-chown -R dmdba:dinstall /data
+mkdir $dm_data_dir
+chown -R dmdba:dinstall $dm_data_dir
 }
 
 function init_xml()
@@ -163,7 +245,7 @@ cat > $dm_root_dir/dminstall.xml << EOF
 
 <DB_PARAMS>
 
-<PATH>/data</PATH>
+<PATH>$dm_data_dir</PATH>
 
 <DB_NAME>DAMENG</DB_NAME>
 
@@ -258,29 +340,7 @@ function unzipfile()
     fi
 }
 #OS_Version=$(cat /etc/redhat-release | awk '{$NF="";print}')
-function echo_color()
-{   
-    nn=""
-    case "$1" in
-        red)    nn="31";;
-        green)  nn="32";;
-        yellow) nn="33";;
-        blue)   nn="34";;
-        purple) nn="35";;
-        cyan)   nn="36";;
-    esac
-    ff=""
-    case "$2" in
-        bold)   ff=";1";;
-        bright) ff=";2";;
-        uscore) ff=";4";;
-        blink)  ff=";5";;
-        invert) ff=";7";;
-    esac
-    color_begin=`echo -e -n "\033[${nn}${ff}m"`
-    color_end=`echo -e -n "\033[0m"`
-    echo $4 "${color_begin}$3${color_end}"
-}
+
 
 function check_dm_run()
 {
@@ -389,11 +449,11 @@ function enable_arch()
         echo_color green bold "数据库已启用归档模式，无需配置"
     else
         echo_color blue bold "数据库未启用归档模式，开始配置..."
-         mkdir -p /data/arch
-         chown -R dmdba:dinstall /data/arch
+         mkdir -p $dm_data_dir/arch
+         chown -R dmdba:dinstall $dm_data_dir/arch
         $dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
     alter database mount;
-    alter database add archivelog 'dest=/data/arch,TYPE=local,FILE_SIZE=1024,SPACE_LIMIT=0';
+    alter database add archivelog 'dest=$dm_data_dir/arch,TYPE=local,FILE_SIZE=1024,SPACE_LIMIT=0';
     alter database archivelog;
     alter database open;
     exit;
@@ -617,6 +677,7 @@ fi
         param_name=$2
         param_value=$3
         sql="SP_SET_PARA_VALUE($param_type, '$param_name', $param_value);"
+        echo $sql >> $dm_root_dir/exec_auto_config.sql
         $dm_disql_path $dm_user/$dm_password@$dm_host:$dm_port << EOF
     $sql
     exit;
@@ -705,17 +766,110 @@ EOF
     echo_color blue bold "自动调整数据库参数..."
     $dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
     SP_SET_PARA_STRING_VALUE(2, 'EXCLUDE_RESERVED_WORDS', 'DOMAIN,XML,EXCHANGE,link');
-    SP_SET_PARA_VALUE(2,'COMPATIBLE_MODE',4);
+    SP_SET_PARA_VALUE(2,'COMPATIBLE_MODE',$dm_run_compatible_mode);
     SP_SET_PARA_VALUE(1,'ENABLE_BLOB_CMP_FLAG',1);
     exit;
 EOF
     echo_color green bold "数据库自动配置完成"
 }
 
+
+function check_disk_free_space()
+{
+# 使用df -k以KB为单位获取剩余空间，这在大多数系统上都兼容
+# 使用awk提取可用空间列（不同系统可能列位置不同，这里取第4列）
+free_space_kb=$(df -k $dm_backup_root_dir | awk 'NR==2 {print $4}')
+
+# 检查命令执行是否失败（如果变量为空或不是数字）
+if [ -z "$free_space_kb" ] || ! [[ "$free_space_kb" =~ ^[0-9]+$ ]]; then
+    echo "无法获取有效的剩余空间值"
+    backup_keep_time_day=7
+    echo "备份保留时间默认设置为7天"
+    return 1  # 函数返回，不再继续执行下面的逻辑
+fi
+
+# 1TB等于1024GB，1GB等于1024KB，所以1TB = 1024*1024*1024KB = 1073741824KB，现在取整1000000000
+# 检查剩余空间是否大于1TB
+if [ "$free_space_kb" -gt 1000000000 ]; then
+    backup_keep_time_day=30
+    echo "备份保留时间默认设置为30天"
+else
+    # 如果空间不足1TB，也设置为7天
+    backup_keep_time_day=7
+    echo "备份保留时间默认设置为7天"
+fi
+}
+
+function create_logical_backup()
+{
+# 在达梦创建备份专用用户
+$dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
+    create tablespace dm_backup_user datafile 'dm_backup_user.dbf' size 300;
+    create user dm_backup_user identified by "dm_backup_Gepoint_2025_6#6#6#" default tablespace dm_backup_user;
+    grant dba to dm_backup_user;
+    exit;
+EOF
+# 定义逻辑备份基础信息
+dm_backup_user="dm_backup_user"
+dm_backup_pwd="dm_backup_Gepoint_2025_6#6#6#"
+mkdir -p $dm_backup_logical_dir
+chown -R dmdba:dinstall $dm_backup_logical_dir
+
+# 根据以上变量生成定时任务脚本
+cat > $dm_root_dir/dm_logical_backup.sh << EOF
+#!/bin/bash
+dm_home="$dm_bin_default"
+dm_backup_user="$dm_backup_user"
+dm_backup_pwd="$dm_backup_pwd"
+export LD_LIBRARY_PATH="\$dm_home:\$LD_LIBRARY_PATH"
+backup_dir="$dm_backup_logical_dir"
+backup_db_sql="SELECT username from dba_users WHERE username NOT IN ('SYSSSO','SYSDBA','SYS','SYSAUDITOR')"
+# 1天是1440分钟,下面的是保留7天,下面的是按照分钟算
+keep_time=$((backup_keep_time_day*1440))
+
+if [ ! -d \$backup_dir ]; then
+mkdir -p \$backup_dir
+chown -R dmdba:dinstall \$backup_dir
+fi
+
+
+db_arr=\$(\$dm_home/disql -S \$dm_backup_user/\"\$dm_backup_pwd\" -e "\$backup_db_sql"|grep -v "username"|grep -v "-"|awk '{if(\$0!="")print}')
+
+date=\`date +"20%y%m%d%H%M%S"\`
+
+for dbname in \${db_arr}
+do
+dmpfile=\$dbname-\$date".dmp"
+logfile=\$dbname-\$date".log"
+\$dm_home/dexp \$dm_backup_user/\"\$dm_backup_pwd\" file=\$backup_dir/\$dmpfile log=\$backup_dir/\$logfile schemas=\$dbname
+done
+
+
+find \$backup_dir -maxdepth 1 -type f -mmin +\$keep_time -name "*"| xargs rm -rf
+
+EOF
+
+# 添加执行权限
+chmod +x $dm_root_dir/dm_logical_backup.sh
+
+# 添加到crontab，每天20点执行
+# 先检查是否已经存在该crontab条目
+crontab -l | grep -q "$dm_root_dir/dm_logical_backup.sh"
+if [ $? -ne 0 ]; then
+    # 不存在则添加新的crontab条目
+    (crontab -l 2>/dev/null; echo "0 20 * * * $dm_root_dir/dm_logical_backup.sh >/dev/null 2>&1") | crontab -
+    echo "已将逻辑备份脚本添加到crontab，每天20点执行"
+else
+    echo "逻辑备份脚本的crontab条目已存在"
+fi
+}
+
+
+
 function create_backup_job()
 {
-     mkdir -p /data/dmbak
-     chown -R dmdba:dinstall /data/
+     mkdir -p $dm_backup_physical_dir
+     chown -R dmdba:dinstall $dm_backup_physical_dir
      # 开启归档
 
      $dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
@@ -723,58 +877,70 @@ function create_backup_job()
         call SP_DROP_JOB('full_bak');
         call SP_CREATE_JOB('full_bak',1,0,'',0,0,'',0,'');
         call SP_JOB_CONFIG_START('full_bak');
-        call SP_ADD_JOB_STEP('full_bak', 'full_bak', 6, '00000000/data/dmbak', 0, 0, 0, 0, NULL, 0);
+        call SP_ADD_JOB_STEP('full_bak', 'full_bak', 6, '00000000$dm_backup_physical_dir', 0, 0, 0, 0, NULL, 0);
         call SP_ADD_JOB_SCHEDULE('full_bak', 'full_bak', 1, 2, 1, 64, 0, '01:00:00', NULL, '2000-01-01 15:17:07', NULL, '');
         call SP_JOB_CONFIG_COMMIT('full_bak');
         call SP_DROP_JOB('incr_bak');
         call SP_CREATE_JOB('incr_bak',1,0,'',0,0,'',0,'');
         call SP_JOB_CONFIG_START('incr_bak');
-        call SP_ADD_JOB_STEP('incr_bak', 'incr_bak', 6, '10000000/data/dmbak|/data/dmbak', 0, 0, 0, 0, NULL, 0);
+        call SP_ADD_JOB_STEP('incr_bak', 'incr_bak', 6, '10000000$dm_backup_physical_dir|$dm_backup_physical_dir', 0, 0, 0, 0, NULL, 0);
         call SP_ADD_JOB_SCHEDULE('incr_bak', 'incr_bak', 1, 2, 1, 63, 0, '01:00:00', NULL, '2000-01-01 15:22:35', NULL, '');
         call SP_JOB_CONFIG_COMMIT('incr_bak');
         call SP_DROP_JOB('remove_bak');
         call SP_CREATE_JOB('remove_bak',1,0,'',0,0,'',0,'');
         call SP_JOB_CONFIG_START('remove_bak');
-        call SP_ADD_JOB_STEP('remove_bak', 'remove_bak', 0, 'call sf_bakset_backup_dir_add(''DISK'',''/data/dmbak'');call sp_db_bakset_remove_batch(''DISK'',now()-7);', 0, 0, 0, 0, NULL, 0);
+        call SP_ADD_JOB_STEP('remove_bak', 'remove_bak', 0, 'call sf_bakset_backup_dir_add(''DISK'',''$dm_backup_physical_dir'');call sp_db_bakset_remove_batch(''DISK'',now()-$backup_keep_time_day);', 0, 0, 0, 0, NULL, 0);
         call SP_ADD_JOB_SCHEDULE('remove_bak', 'remove_bak', 1, 1, 1, 0, 0, '20:00:00', NULL, '2000-01-01 15:38:32', NULL, '');
         call SP_JOB_CONFIG_COMMIT('remove_bak');
         call SP_DROP_JOB('JOB_DEL_ARCH_TIMELY');
         call SP_CREATE_JOB('JOB_DEL_ARCH_TIMELY',1,0,'',0,0,'',0,'定时删除备份');
         call SP_JOB_CONFIG_START('JOB_DEL_ARCH_TIMELY');
-        call SP_ADD_JOB_STEP('JOB_DEL_ARCH_TIMELY', 'STEP_DEL_ARCH', 0, 'SF_ARCHIVELOG_DELETE_BEFORE_TIME(SYSDATE - 7);', 1, 2, 0, 0, NULL, 0);
+        call SP_ADD_JOB_STEP('JOB_DEL_ARCH_TIMELY', 'STEP_DEL_ARCH', 0, 'SF_ARCHIVELOG_DELETE_BEFORE_TIME(SYSDATE - $backup_keep_time_day);', 1, 2, 0, 0, NULL, 0);
         call SP_ADD_JOB_SCHEDULE('JOB_DEL_ARCH_TIMELY', 'SCHEDULE_DEL_ARCH', 1, 1, 1, 0, 0, '20:00:00', NULL, '2020-03-20 21:05:57', NULL, '');
         call SP_JOB_CONFIG_COMMIT('JOB_DEL_ARCH_TIMELY');
         exit;
 EOF
-    cat > /tmp/create_job.sql << 'EOF'
+    cat > /tmp/create_job.sql << EOF
 call SP_INIT_JOB_SYS(1);
 call SP_DROP_JOB('full_bak');
 call SP_CREATE_JOB('full_bak',1,0,'',0,0,'',0,'');
 call SP_JOB_CONFIG_START('full_bak');
-call SP_ADD_JOB_STEP('full_bak', 'full_bak', 6, '00000000/data/dmbak', 0, 0, 0, 0, NULL, 0);
+call SP_ADD_JOB_STEP('full_bak', 'full_bak', 6, '00000000$dm_backup_physical_dir', 0, 0, 0, 0, NULL, 0);
 call SP_ADD_JOB_SCHEDULE('full_bak', 'full_bak', 1, 2, 1, 64, 0, '01:00:00', NULL, '2000-01-01 15:17:07', NULL, '');
 call SP_JOB_CONFIG_COMMIT('full_bak');
 call SP_DROP_JOB('incr_bak');
 call SP_CREATE_JOB('incr_bak',1,0,'',0,0,'',0,'');
 call SP_JOB_CONFIG_START('incr_bak');
-call SP_ADD_JOB_STEP('incr_bak', 'incr_bak', 6, '10000000/data/dmbak|/data/dmbak', 0, 0, 0, 0, NULL, 0);
+call SP_ADD_JOB_STEP('incr_bak', 'incr_bak', 6, '10000000$dm_backup_physical_dir|$dm_backup_physical_dir', 0, 0, 0, 0, NULL, 0);
 call SP_ADD_JOB_SCHEDULE('incr_bak', 'incr_bak', 1, 2, 1, 63, 0, '01:00:00', NULL, '2000-01-01 15:22:35', NULL, '');
 call SP_JOB_CONFIG_COMMIT('incr_bak');
 call SP_DROP_JOB('remove_bak');
 call SP_CREATE_JOB('remove_bak',1,0,'',0,0,'',0,'');
 call SP_JOB_CONFIG_START('remove_bak');
-call SP_ADD_JOB_STEP('remove_bak', 'remove_bak', 0, 'call sf_bakset_backup_dir_add(''DISK'',''/data/dmbak'');call sp_db_bakset_remove_batch(''DISK'',now()-7);', 0, 0, 0, 0, NULL, 0);
+call SP_ADD_JOB_STEP('remove_bak', 'remove_bak', 0, 'call sf_bakset_backup_dir_add(''DISK'',''$dm_backup_physical_dir'');call sp_db_bakset_remove_batch(''DISK'',now()-$backup_keep_time_day);', 0, 0, 0, 0, NULL, 0);
 call SP_ADD_JOB_SCHEDULE('remove_bak', 'remove_bak', 1, 1, 1, 0, 0, '20:00:00', NULL, '2000-01-01 15:38:32', NULL, '');
 call SP_JOB_CONFIG_COMMIT('remove_bak');
 call SP_DROP_JOB('JOB_DEL_ARCH_TIMELY');
 call SP_CREATE_JOB('JOB_DEL_ARCH_TIMELY',1,0,'',0,0,'',0,'定时删除备份');
 call SP_JOB_CONFIG_START('JOB_DEL_ARCH_TIMELY');
-call SP_ADD_JOB_STEP('JOB_DEL_ARCH_TIMELY', 'STEP_DEL_ARCH', 0, 'SF_ARCHIVELOG_DELETE_BEFORE_TIME(SYSDATE - 7);', 1, 2, 0, 0, NULL, 0);
+call SP_ADD_JOB_STEP('JOB_DEL_ARCH_TIMELY', 'STEP_DEL_ARCH', 0, 'SF_ARCHIVELOG_DELETE_BEFORE_TIME(SYSDATE - $backup_keep_time_day);', 1, 2, 0, 0, NULL, 0);
 call SP_ADD_JOB_SCHEDULE('JOB_DEL_ARCH_TIMELY', 'SCHEDULE_DEL_ARCH', 1, 1, 1, 0, 0, '20:00:00', NULL, '2020-03-20 21:05:57', NULL, '');
 call SP_JOB_CONFIG_COMMIT('JOB_DEL_ARCH_TIMELY');
 EOF
    echo_color green bold "如果创建备份任务失败，请手动执行以下命令:"
    echo_color green bold "$dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port < /tmp/create_job.sql"
+}
+
+function open_slowlog() {
+    echo_color blue bold "正在开启慢查询日志..."
+    sed -i "s/^[[:space:]]*SWITCH_LIMIT[[:space:]]*=[[:space:]]*[0-9]*/    SWITCH_LIMIT   = 1024/g" $dm_data_dir/DAMENG/sqllog.ini
+    sed -i "s/^[[:space:]]*SQL_TRACE_MASK[[:space:]]*=[[:space:]]*[0-9]*/    SQL_TRACE_MASK   = 2:25:28/g" $dm_data_dir/DAMENG/sqllog.ini
+    sed -i "s/^[[:space:]]*MIN_EXEC_TIME[[:space:]]*=[[:space:]]*[0-9]*/    MIN_EXEC_TIME   = 2/g" $dm_data_dir/DAMENG/sqllog.ini
+    $dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
+    CALL SP_REFRESH_SVR_LOG_CONFIG();
+    SP_SET_PARA_VALUE(1,'SVR_LOG',1);
+    exit;
+EOF
 }
 
 
@@ -819,25 +985,35 @@ EOF
 }
 
 ##############main process##################
-while getopts "p:a:t:h" arg
+while getopts "p:m:d:b:t:h" arg
 do
     case $arg in
     p)
         echo "you will install the dm and the port while be use $OPTARG"
         dm_run_port=$OPTARG
         ;;
-    a)
-        echo "we will set the dm pass $OPTARG"
-        pass=$OPTARG
+    m)
+        echo "we will set the dm_compatible_mode $OPTARG"
+        dm_compatible_mode=$OPTARG
+        ;;
+    d)
+        echo "we will set the dm data directory $OPTARG"
+        dm_data_dir=$OPTARG
+        ;;
+    b)
+        echo "we will set the dm backup directory $OPTARG"
+        dm_backup_root_dir=$OPTARG
         ;;
     t)
-            echo "we will install specified dm version $OPTARG"
-            target_version=$OPTARG
-            ;;
+        echo "we will install specified dm version $OPTARG"
+        target_version=$OPTARG
+        ;;
     h)
         echo -en "you can use follow options: \n"\
              "-p [default 5236]  set the dm port; \n"\
-             "-a [default Gepoint] set the dm pass; \n"\
+             "-m [default mysql] set the dm_compatible_mode mysql_mode or oracle_mode; \n"\
+             "-d [default /data] set the dm data directory; \n"\
+             "-b [default /dm_backup] set the dm backup directory; \n"\
              "-t install  dm specified version; \n"\
              "-h Help \n"
         exit 1
@@ -852,7 +1028,7 @@ done
 #   echo "you must specified -t argument ,example -t /opt/DMInstall.bin"
 #   exit 1
 # fi
-check_target_version_path
+check_bin_arguments
 print_info
 check_dm_run
 unzipfile
@@ -862,8 +1038,11 @@ install_dm
 check_install
 add_run_env
 enable_arch
+check_disk_free_space
+create_logical_backup
 create_backup_job
 auto_config
+open_slowlog
 restart_db
 change_pwd
 exit
