@@ -10,11 +10,11 @@ COPY='/usr/bin/cp'
 if [[ ! -f ${COPY} ]];then
     COPY='/bin/cp'
 fi
-
+export LANG=en_US.UTF-8
 
 # 数据库连接参数
 dm_user_default="SYSDBA"          # 改密码之前的默认数据库用户名
-dm_password_default="SYSDBA"  # 改密码之前的数据库默认密码
+dm_password_default="SYSDBA_sysdba_123"  # 改密码之前的数据库默认密码
 dm_host_default="localhost"        # 数据库主机
 dm_port_default="5236"             # 默认数据库端口
 dm_bin_default="/home/dmdba/dmdbms/bin" # 默认达梦bin目录
@@ -66,7 +66,19 @@ function check_bin_arguments() {
         # 检查文件是否存在
         if [ -f "$target_version" ]; then
             echo_color green bold "文件存在: $target_version"
-            
+            # 在指定-t参数之后，必须显示指定-l参数，否则直接退出程序
+            if [ -z "$length_in_char" ]; then
+                echo_color red invert "错误: 指定-t参数之后,必须指定-l参数,比如-l 0或者-l 1"
+                echo_color red invert "注意: 2024年6月及之后的版本只能指定-l值为0否则安装会失败"
+                exit 1
+            else
+                echo_color green bold "使用的length_in_char参数值: $length_in_char"
+                # 判断下length_in_char的值只能是数字0或者数字1
+                if [ "$length_in_char" != "0" ] && [ "$length_in_char" != "1" ]; then
+                    echo_color red invert "错误: length_in_char参数值只能是数字0或者数字1"
+                    exit 1
+                fi
+            fi
             # 检查文件后缀
             if [[ "$target_version" == *.iso ]]; then
                 echo_color yellow bold "检测到ISO文件，准备挂载..."
@@ -92,7 +104,6 @@ function check_bin_arguments() {
                 echo_color red invert "错误: 不支持的文件格式: $target_version"
                 exit 1
             fi
-            return 0
         else
             echo_color red invert "错误: 文件不存在或不是常规文件: $target_version"
             exit 1
@@ -226,6 +237,11 @@ chown -R dmdba:dinstall $dm_data_dir
 
 function init_xml()
 {
+col_length_in_char="<LENGTH_IN_CHAR>1</LENGTH_IN_CHAR>"
+# 如果length_in_char为0，那么col_length_in_char就为空
+if [ "$length_in_char" = "0" ]; then
+    col_length_in_char=""
+fi
 # 输出XML内容到dminstall.xml文件
 cat > $dm_root_dir/dminstall.xml << EOF
 <?xml version="1.0"?>
@@ -269,13 +285,13 @@ cat > $dm_root_dir/dminstall.xml << EOF
 
 <CHARSET>1</CHARSET>
 
-<LENGTH_IN_CHAR>0</LENGTH_IN_CHAR>
+$col_length_in_char
 
 <USE_NEW_HASH>1</USE_NEW_HASH>
 
-<SYSDBA_PWD></SYSDBA_PWD>
+<SYSDBA_PWD>$dm_password_default</SYSDBA_PWD>
 
-<SYSAUDITOR_PWD></SYSAUDITOR_PWD>
+<SYSAUDITOR_PWD>$dm_password_default</SYSAUDITOR_PWD>
 
 <SYSSSO_PWD></SYSSSO_PWD>
 
@@ -449,7 +465,10 @@ function enable_arch()
         echo_color green bold "数据库已启用归档模式，无需配置"
     else
         echo_color blue bold "数据库未启用归档模式，开始配置..."
-         mkdir -p $dm_data_dir/arch
+        echo_color blue bold "打印数据目录:$dm_data_dir"
+        ls -l $dm_data_dir
+        # 如果执行mkdir -p $dm_data_dir/arch 报错就退出程序
+        mkdir -p $dm_data_dir/arch || { echo_color red bold "创建归档目录失败"; exit 1; }
          chown -R dmdba:dinstall $dm_data_dir/arch
         $dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
     alter database mount;
@@ -968,6 +987,8 @@ EOF
     # 检查密码修改是否成功
     if [ $? -eq 0 ]; then
         echo_color green bold "SYSDBA用户密码修改成功"
+        echo_color purple bold "数据库参数信息如下"
+        $dm_disql_path_default -S $dm_user_default/\"$new_password\"@$dm_host_default:$dm_run_port -e "select para_value LENGTH_IN_CHAR,page PAGE_SIZE,SF_GET_EXTENT_SIZE() EXTENT_SIZE, DECODE(unicode,'1','utf8',0,'gbk','EUC-KR') as CHARSET,CASE_SENSITIVE from v\$dm_ini where para_name = 'LENGTH_IN_CHAR';"
     else
         echo_color red bold "SYSDBA用户密码修改失败"
         echo_color yellow bold "请手动使用以下命令修改密码:"
@@ -975,17 +996,31 @@ EOF
     fi
 
     # 显示生成的密码（注意保密）
-    echo_color green bold "生成的随机密码: $new_password"
-    echo_color yellow bold "请务必记录此密码，它将用于SYSDBA用户登录"
+    # echo_color green bold "生成的随机密码: $new_password"
+    # echo_color yellow bold "请务必记录此密码，它将用于SYSDBA用户登录"
     echo $new_password > $dm_root_dir/dmpwd.txt
-    echo_color green bold "密码已保存到 $dm_root_dir/dmpwd.txt"
-    echo_color yellow bold "请按照顺序执行如下命令:"
-    echo_color yellow bold "source /root/.bash_profile"
-    echo_color yellow bold "disql SYSDBA/$new_password@$dm_host_default:$dm_run_port"
+    # echo_color green bold "密码已保存到 $dm_root_dir/dmpwd.txt"
+    # echo_color yellow bold "请按照顺序执行如下命令:"
+    # echo_color yellow bold "source /root/.bash_profile"
+    # echo_color yellow bold "disql SYSDBA/$new_password@$dm_host_default:$dm_run_port"
+    echo -e "
+##########################################################################
+#                                                                        #
+#        :) DM Install Complete !                                        #
+#\033[31;49;1m     生成的随机密码: $new_password\033[39;49;0m                                   #
+#\033[31;49;1m     请务必记录此密码，它将用于SYSDBA用户登录\033[39;49;0m                           #
+#\033[31;49;1m     密码已保存到 $dm_root_dir/dmpwd.txt\033[39;49;0m                          #
+#\033[31;49;1m     请按照顺序执行如下命令:\033[39;49;0m                                            #
+#\033[31;49;1m     source /root/.bash_profile\033[39;49;0m                                         #           
+#\033[31;49;1m     连接示例:disql SYSDBA/$new_password@$dm_host_default:$dm_run_port\033[39;49;0m              #
+#                                                                        #
+##########################################################################
+"
+
 }
 
 ##############main process##################
-while getopts "p:m:d:b:t:h" arg
+while getopts "p:m:d:b:t:l:h" arg
 do
     case $arg in
     p)
@@ -1008,6 +1043,10 @@ do
         echo "we will install specified dm version $OPTARG"
         target_version=$OPTARG
         ;;
+    l)
+        echo "we will install specified dm length_in_char $OPTARG"
+        length_in_char=$OPTARG
+        ;;
     h)
         echo -en "you can use follow options: \n"\
              "-p [default 5236]  set the dm port; \n"\
@@ -1015,6 +1054,7 @@ do
              "-d [default /data] set the dm data directory; \n"\
              "-b [default /dm_backup] set the dm backup directory; \n"\
              "-t install  dm specified version; \n"\
+             "-l install dm specified length_in_char,like -l 0 then do not enable length_in_char ; \n"\
              "-h Help \n"
         exit 1
         ;;
