@@ -465,17 +465,17 @@ function enable_arch()
         echo_color green bold "数据库已启用归档模式，无需配置"
     else
         echo_color blue bold "数据库未启用归档模式，开始配置..."
+        mkdir -p $dm_data_dir/arch
         echo_color blue bold "打印数据目录:$dm_data_dir"
         ls -l $dm_data_dir
-        # 如果执行mkdir -p $dm_data_dir/arch 报错就退出程序
-        mkdir -p $dm_data_dir/arch || { echo_color red bold "创建归档目录失败"; exit 1; }
-         chown -R dmdba:dinstall $dm_data_dir/arch
+        chown -R dmdba:dinstall $dm_data_dir/arch
         $dm_disql_path_default $dm_user_default/$dm_password_default@$dm_host_default:$dm_run_port << EOF
-    alter database mount;
-    alter database add archivelog 'dest=$dm_data_dir/arch,TYPE=local,FILE_SIZE=1024,SPACE_LIMIT=0';
-    alter database archivelog;
-    alter database open;
-    exit;
+alter database mount;
+sp_set_para_value(1,'ARCH_INI',1);
+alter database add archivelog 'dest=$dm_data_dir/arch,TYPE=local,FILE_SIZE=1024,SPACE_LIMIT=0';
+alter database archivelog;
+alter database open;
+exit;
 EOF
     echo_color green bold "数据库归档模式配置完成"
     fi
@@ -537,7 +537,7 @@ else
 fi
 
 # 调整内存计算
-v_mem_mb=$(echo "scale=0; $v_mem_mb * $mem_per / 100" | bc)
+# v_mem_mb=$(echo "scale=0; $v_mem_mb * $mem_per / 100" | bc)
 # 四舍五入到千位
 v_mem_mb=$(echo "scale=0; $v_mem_mb / 1000 * 1000" | bc)
 
@@ -552,8 +552,7 @@ if [ $v_mem_mb -gt 512000 ]; then
 fi
 
 # 计算核心参数
-MEMORY_TARGET=$(echo "scale=0; $v_mem_mb * 0.12" | bc)
-MEMORY_TARGET=$(echo "scale=0; $MEMORY_TARGET / 1000 * 1000" | bc)
+
 
 # 设置线程参数
 TASK_THREADS=4
@@ -569,8 +568,8 @@ if [ $v_cpus -ge 64 ]; then
     IO_THR_GROUPS=8
 fi
 
-# 缓冲区参数
-BUFFER=$(echo "scale=0; $v_mem_mb * 0.4" | bc)
+# 缓冲区参数,根据达梦给的建议是按照物理内存的60%-80%
+BUFFER=$(echo "scale=0; $v_mem_mb * 0.6" | bc)
 BUFFER=$(echo "scale=0; $BUFFER / 1000 * 1000" | bc)
 MAX_BUFFER=$BUFFER
 
@@ -686,6 +685,10 @@ else
     HAGR_BUF_SIZE=$HJ_BUF_SIZE
 fi
 
+# MEMORY_TARGET=$(echo "scale=0; $v_mem_mb * 0.12" | bc)
+# 根据达梦建议MEMORY_TARGET为MEMORY_POOL的1.5-2倍
+MEMORY_TARGET=$(echo "scale=0; $MEMORY_POOL * 1.5" | bc)
+MEMORY_TARGET=$(echo "scale=0; $MEMORY_TARGET / 1000 * 1000" | bc)
 
 # 执行参数设置
     echo "正在应用参数设置..."
@@ -833,6 +836,8 @@ dm_backup_user="dm_backup_user"
 dm_backup_pwd="dm_backup_Gepoint_2025_6#6#6#"
 mkdir -p $dm_backup_logical_dir
 chown -R dmdba:dinstall $dm_backup_logical_dir
+# 根据上面dm_backup_logical_dir变量自动计算备份保留的天数
+check_disk_free_space
 
 # 根据以上变量生成定时任务脚本
 cat > $dm_root_dir/dm_logical_backup.sh << EOF
@@ -843,7 +848,7 @@ dm_backup_pwd="$dm_backup_pwd"
 export LD_LIBRARY_PATH="\$dm_home:\$LD_LIBRARY_PATH"
 backup_dir="$dm_backup_logical_dir"
 backup_db_sql="SELECT username from dba_users WHERE username NOT IN ('SYSSSO','SYSDBA','SYS','SYSAUDITOR')"
-# 1天是1440分钟,下面的是保留7天,下面的是按照分钟算
+# 1天是1440分钟,下面的是保留$backup_keep_time_day天,下面的是按照分钟算
 keep_time=$((backup_keep_time_day*1440))
 
 if [ ! -d \$backup_dir ]; then
@@ -852,7 +857,7 @@ chown -R dmdba:dinstall \$backup_dir
 fi
 
 
-db_arr=\$(\$dm_home/disql -S \$dm_backup_user/\"\$dm_backup_pwd\" -e "\$backup_db_sql"|grep -v "username"|grep -v "-"|awk '{if(\$0!="")print}')
+db_arr=\$(\$dm_home/disql -S \$dm_backup_user/\"\$dm_backup_pwd\"@$dm_host_default:$dm_run_port -e "\$backup_db_sql"|grep -v "username"|grep -v "-"|awk '{if(\$0!="")print}')
 
 date=\`date +"20%y%m%d%H%M%S"\`
 
@@ -860,7 +865,7 @@ for dbname in \${db_arr}
 do
 dmpfile=\$dbname-\$date".dmp"
 logfile=\$dbname-\$date".log"
-\$dm_home/dexp \$dm_backup_user/\"\$dm_backup_pwd\" file=\$backup_dir/\$dmpfile log=\$backup_dir/\$logfile schemas=\$dbname
+\$dm_home/dexp \$dm_backup_user/\"\$dm_backup_pwd\"@$dm_host_default:$dm_run_port file=\$backup_dir/\$dmpfile log=\$backup_dir/\$logfile schemas=\$dbname
 done
 
 
@@ -940,7 +945,7 @@ call SP_ADD_JOB_STEP('remove_bak', 'remove_bak', 0, 'call sf_bakset_backup_dir_a
 call SP_ADD_JOB_SCHEDULE('remove_bak', 'remove_bak', 1, 1, 1, 0, 0, '20:00:00', NULL, '2000-01-01 15:38:32', NULL, '');
 call SP_JOB_CONFIG_COMMIT('remove_bak');
 call SP_DROP_JOB('JOB_DEL_ARCH_TIMELY');
-call SP_CREATE_JOB('JOB_DEL_ARCH_TIMELY',1,0,'',0,0,'',0,'定时删除备份');
+call SP_CREATE_JOB('JOB_DEL_ARCH_TIMELY',1,0,'',0,0,'',0,'auto delete backup file');
 call SP_JOB_CONFIG_START('JOB_DEL_ARCH_TIMELY');
 call SP_ADD_JOB_STEP('JOB_DEL_ARCH_TIMELY', 'STEP_DEL_ARCH', 0, 'SF_ARCHIVELOG_DELETE_BEFORE_TIME(SYSDATE - $backup_keep_time_day);', 1, 2, 0, 0, NULL, 0);
 call SP_ADD_JOB_SCHEDULE('JOB_DEL_ARCH_TIMELY', 'SCHEDULE_DEL_ARCH', 1, 1, 1, 0, 0, '20:00:00', NULL, '2020-03-20 21:05:57', NULL, '');
@@ -989,6 +994,11 @@ EOF
         echo_color green bold "SYSDBA用户密码修改成功"
         echo_color purple bold "数据库参数信息如下"
         $dm_disql_path_default -S $dm_user_default/\"$new_password\"@$dm_host_default:$dm_run_port -e "select para_value LENGTH_IN_CHAR,page PAGE_SIZE,SF_GET_EXTENT_SIZE() EXTENT_SIZE, DECODE(unicode,'1','utf8',0,'gbk','EUC-KR') as CHARSET,CASE_SENSITIVE from v\$dm_ini where para_name = 'LENGTH_IN_CHAR';"
+        $dm_disql_path_default -S $dm_user_default/\"$new_password\"@$dm_host_default:$dm_run_port -e "select para_name,para_value from v\$dm_ini where para_name in ('COMPATIBLE_MODE','SVR_LOG','BUFFER','MAX_OS_MEMORY','MAX_SESSIONS','MEMORY_POOL','MEMORY_TARGET');"
+        echo_color purple bold "物理备份定时任务如下"
+        $dm_disql_path_default -S $dm_user_default/\"$new_password\"@$dm_host_default:$dm_run_port -e "SELECT NAME,decode(ENABLE,1,'enable') status,USERNAME,CREATETIME FROM SYSJOB.SYSJOBS;"
+        echo_color purple bold "逻辑备份定时任务如下"
+        crontab -l|grep dm
     else
         echo_color red bold "SYSDBA用户密码修改失败"
         echo_color yellow bold "请手动使用以下命令修改密码:"
@@ -1012,7 +1022,7 @@ EOF
 #\033[31;49;1m     密码已保存到 $dm_root_dir/dmpwd.txt\033[39;49;0m                          #
 #\033[31;49;1m     请按照顺序执行如下命令:\033[39;49;0m                                            #
 #\033[31;49;1m     source /root/.bash_profile\033[39;49;0m                                         #           
-#\033[31;49;1m     连接示例:disql SYSDBA/$new_password@$dm_host_default:$dm_run_port\033[39;49;0m              #
+#\033[31;49;1m     连接示例 disql SYSDBA/$new_password@$dm_host_default:$dm_run_port\033[39;49;0m              #
 #                                                                        #
 ##########################################################################
 "
@@ -1078,7 +1088,6 @@ install_dm
 check_install
 add_run_env
 enable_arch
-check_disk_free_space
 create_logical_backup
 create_backup_job
 auto_config
