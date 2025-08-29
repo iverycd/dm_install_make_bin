@@ -1,13 +1,17 @@
 # 达梦bin包一键安装
 
 ## 一、特性
+* 安装支持指定版本，指定端口，数据目录，备份目录，数据库兼容模式，length_in_char参数
 * 安装前会自动检测达梦实例进程(`dmserver`)是否在运行，如有自动退出安装，如果`/home/dmdba/dmdbms/bin/dmserver`存在也会自动退出安装
 * 自动修改/etc/security/limits.conf文件，增加达梦用户的资源限制
-* 自动创建达梦用户以及用户组
-* 安装时参数，大小写不敏感，UTF8字符集，EXTENT_SIZE：16k，PAGE_SIZE：32k，LENGTH_IN_CHAR：0，默认端口5236
-* 安装后数据目录在/data/DAMENG目录，归档日志在/data/arch，物理备份在/data/dmbak
-* bin包安装后自动开启物理备份任务（周六01点开始全备，其余每天01点开始增量备份，备份保留7天，自动删除7天前的归档日志）
-* 安装后随机生成SYSDBA密码
+* 自动创建达梦用户以及用户组,默认数据目录/data/DAMENG目录，归档目录/data/arch
+* 自动创建物理备份任务，周六01点开始全备，其余每天01点开始增量备份），备份在/dm_backup/physical
+* 自动创建逻辑备份任务，每晚20点执行逻辑备份,备份在/dm_backup/logical
+* 自动生成SYSDBA随机密码
+* 自动根据服务器cpu核心数，内存大小，调整数据库性能参数
+* 自动调整备份以及归档日志保留天数，大于1t默认保留30天，否则保留7天
+* 自动开启数据库慢日志，默认记录2秒以上的sql语句
+
 
 ## 二、准备
 将原厂bin包放到dm_all_in_one目录，如果是x86的重命名为DMInstall_x86.bin,如果是arm的重命名为DMInstall_arm.bin
@@ -35,7 +39,45 @@ make -f Makefile-arm
 
 ## 四、如何运行
 使用root账号上传到任意目录比如/opt然后执行sh bin包文件名称
-例如：sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin
+
+例如:
+
+查看帮助信息
+```bash
+[root@centos79 opt]# sh dm_x86_20240115_INSTALL_2025-08-28_16-42-20.bin -h
+you can use follow options: 
+ -p [default 5236]  set the dm port; 默认端口5236，可指定自定义端口
+ -m [default mysql] set the dm_compatible_mode mysql_mode or oracle_mode; 默认数据库兼容模式为mysql，可指定为oracle_mode
+ -d [default /data] set the dm data directory; 默认数据目录为/data，可指定自定义数据目录
+ -b [default /dm_backup] set the dm backup directory; 默认备份目录为/dm_backup，可指定自定义备份目录
+ -t install dm specified version; 默认安装bin包本身的数据库程序，可指定安装其他版本的安装包
+ -l install dm specified length_in_char,like -l 0 then do not enable length_in_char ; 默认安装时length_in_char=1，可指定为0
+ -h Help 
+```
+
+如果不指定任何参数，默认安装bin包本身的数据库程序，安装后默认端口5236，数据目录为/data，备份目录为/dm_backup，数据库兼容模式为mysql,length_in_char=1，例如:
+```bash
+sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin
+```
+
+如果要安装特定版本的安装包，使用-t参数后面指定iso或者bin结尾的安装包文件，安装后默认端口5236，数据目录为/data，备份目录为/dm_backup，数据库兼容模式为mysql,length_in_char=0，例如:
+```bash
+sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin -t dm8_20250423_HWarm920_kylin10_sp1_64.iso -l 0
+或者
+sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin -t DMInstall.bin -l 0
+以上需要知道的是：
+1. -t参数后面指定的安装包文件名后缀必须是iso或者bin
+2. 指定了-t参数前提下，-l参数是必填项，如果是0那么安装的时候length_in_char=0，否则length_in_char=1
+3. 达梦在2024年6月及之后的版本中取消了length_in_char参数，所以如果安装此类版本，-l参数必须指定为0否则安装会被终止
+```
+
+如果安装的时候需要指定端口，指定安装目录，指定备份目录，指定数据库兼容模式，那么可以使用如下命令：
+```bash
+以下指定安装的版本为dm8_20250423_HWarm920_kylin10_sp1_64.iso，数据目录为/dmdata，备份目录为/dmbak，端口为5239，数据库兼容模式为oracle_mode,length_in_char=0
+sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin -t dm8_20250423_HWarm920_kylin10_sp1_64.iso -l 0 -d /dmdata -b /dmbak -p 5239 -m oracle_mode
+或者
+sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin -t DMInstall.bin -l 0 -d /dmdata -b /dmbak -p 5239 -m oracle_mode
+```
 
 
 ```bash
@@ -195,9 +237,43 @@ disql V8
 SQL> executed successfully
 used time: 2.723(ms). Execute id is 63101.
 SQL> SYSDBA用户密码修改成功
-生成的随机密码: .Y7Z4_TwLYH8_Ep0
-请务必记录此密码，它将用于SYSDBA用户登录
-请按照顺序执行如下命令:
-source /root/.bash_profile
-disql SYSDBA/.Y7Z4_TwLYH8_Ep0@localhost:5236
+
+数据库参数信息如下
+
+LENGTH_IN_CHAR PAGE_SIZE   EXTENT_SIZE CHARSET CASE_SENSITIVE
+-------------- ----------- ----------- ------- --------------
+1              32768       16          utf8    0
+
+para_name       para_value
+--------------- ----------
+MAX_OS_MEMORY   70
+MEMORY_POOL     1500
+MEMORY_TARGET   2000
+BUFFER          9000
+MAX_SESSIONS    1500
+COMPATIBLE_MODE 4
+SVR_LOG         1
+物理备份定时任务如下
+
+NAME                status USERNAME CREATETIME         
+------------------- ------ -------- -------------------
+full_bak            enable SYSDBA   2025-08-29 14:31:07
+incr_bak            enable SYSDBA   2025-08-29 14:31:07
+JOB_DEL_ARCH_TIMELY enable SYSDBA   2025-08-29 14:31:07
+remove_bak          enable SYSDBA   2025-08-29 14:31:07
+逻辑备份定时任务如下
+0 20 * * * /opt/dm_all_in_one/dm_logical_backup.sh >/dev/null 2>&1
+
+##########################################################################
+#                                                                        #
+#        :) DM Install Complete !                                        #
+#     生成的随机密码: SgvnJB7cUhu5_Ep0                                   #
+#     请务必记录此密码，它将用于SYSDBA用户登录                           #
+#     密码已保存到 /opt/dm_all_in_one/dmpwd.txt                          #
+#     请按照顺序执行如下命令:                                            #
+#     source /root/.bash_profile                                         #           
+#     连接示例 disql SYSDBA/SgvnJB7cUhu5_Ep0@localhost:5236              #
+#                                                                        #
+##########################################################################
+
 ```
