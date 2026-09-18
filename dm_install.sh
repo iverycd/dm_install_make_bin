@@ -32,6 +32,8 @@ INSTALL_TAG_GZ=dm_install_content
 dm_untar_dir=/opt
 dm_root_dir=$dm_untar_dir/dm_all_in_one
 mkdir -p ${dm_root_dir}
+# DMInstall.bin 安装过程使用的临时目录
+dm_install_tmpdir=/opt/temp01
 
 
 function echo_color()
@@ -182,7 +184,10 @@ function init_env()
 # 如果没有指定-t参数，即没有指定特定安装包
 if [ -z "$target_version" ]; then
 # 统一安装包名称
-mv $dm_root_dir/DMInstall_*.bin $dm_root_dir/DMInstall.bin
+if ! mv $dm_root_dir/DMInstall_*.bin $dm_root_dir/DMInstall.bin; then
+    echo_color red invert "错误: 未找到达梦安装包 DMInstall_*.bin，请检查安装包是否完整"
+    exit 1
+fi
 fi
 
 # 检查用户组是否存在，避免使用黑名单命令 groupadd
@@ -230,9 +235,8 @@ for limit in "${limits_conf[@]}"; do
 export LANG=en_US
 chown dmdba:dinstall $dm_root_dir/DMInstall.bin
 chmod +x $dm_root_dir/DMInstall.bin
-# 创建达梦数据文件目录
-mkdir $dm_data_dir
-chown -R dmdba:dinstall $dm_data_dir
+# 创建达梦数据文件目录，此处不对$dm_data_dir递归授权，避免影响该目录下其他应用的数据
+mkdir -p $dm_data_dir
 }
 
 function init_xml()
@@ -379,6 +383,12 @@ function install_dm()
 {
     # 执行数据库安装命令
     echo_color blue bold "开始安装达梦数据库..."
+
+    # 指定 DMInstall.bin 安装过程使用的临时目录，避免使用空间不足的系统 /tmp
+    mkdir -p $dm_install_tmpdir
+    chown -R dmdba:dinstall $dm_install_tmpdir
+    export DM_INSTALL_TMPDIR=$dm_install_tmpdir
+
     sh $dm_root_dir/DMInstall.bin -q $dm_root_dir/dminstall.xml
 
     # 检查安装是否成功
@@ -388,6 +398,13 @@ function install_dm()
         exit 1
     else
         echo_color green bold "数据库安装成功"
+    fi
+
+    # 只对达梦自己创建的数据库子目录授权，不影响$dm_data_dir下的其他兄弟目录
+    if [ -d "$dm_data_dir/DAMENG" ]; then
+        chown -R dmdba:dinstall $dm_data_dir/DAMENG
+    else
+        echo_color yellow bold "警告: 未找到 $dm_data_dir/DAMENG 目录，跳过属主修正"
     fi
 }
 
