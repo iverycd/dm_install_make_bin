@@ -3,3 +3,4 @@ TargetBin/*
 dm_install_content*.tar.gz
 .DS_Store
 .idea
+tests

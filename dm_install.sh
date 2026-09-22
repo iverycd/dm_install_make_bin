@@ -1,4 +1,6 @@
 #!/bin/bash
+# 支持原有 sh xxx.bin 调用，在非 Bash shell 下重新进入 Bash。
+[ -n "${BASH_VERSION:-}" ] || exec /bin/bash "$0" "$@"
 ######################################################
 #
 #Install the dm ALL IN ONE
@@ -6,10 +8,6 @@
 #
 ######################################################
 
-COPY='/usr/bin/cp'
-if [[ ! -f ${COPY} ]];then
-    COPY='/bin/cp'
-fi
 export LANG=en_US.UTF-8
 
 # 数据库连接参数
@@ -19,21 +17,13 @@ dm_host_default="localhost"        # 数据库主机
 dm_port_default="5236"             # 默认数据库端口
 dm_bin_default="/home/dmdba/dmdbms/bin" # 默认达梦bin目录
 dm_disql_path_default="/home/dmdba/dmdbms/bin/disql"  # 默认disql工具路径
-dm_data_dir_default="/data" # 默认数据库数据目录
+dm_data_dir_default="/data/dmdb" # 默认数据库数据目录
 backup_keep_time_day=7             # 备份保留时间，单位天
 dm_backup_dir_default="/dm_backup"    # 默认备份根目录
 
-# bin包分离出tar包的转储的临时目录
-installfilepath=/tmp/dmtmp
-mkdir -p ${installfilepath}
-# 从bin包分离出来重定向的tar包名称
-INSTALL_TAG_GZ=dm_install_content
-# 从上面重定向的tar包解压之后，指定应用的数据所在目录
+# 持久工作目录保存日志；每次安装的文件使用独立临时目录。
 dm_untar_dir=/opt
 dm_root_dir=$dm_untar_dir/dm_all_in_one
-mkdir -p ${dm_root_dir}
-# DMInstall.bin 安装过程使用的临时目录
-dm_install_tmpdir=/opt/temp01
 
 
 function echo_color()
@@ -61,141 +51,192 @@ function echo_color()
 }
 
 
-# 检查bin包运行时的输入参数
-function check_bin_arguments() {
-    # 检查指定的达梦安装包是否存在,如果-t指定自定义安装包，对文件进行检查，分别对iso以及bin文件做不同处理
-    if [ ! -z "$target_version" ]; then
-        # 检查文件是否存在
-        if [ -f "$target_version" ]; then
-            echo_color green bold "文件存在: $target_version"
-            # 在指定-t参数之后，必须显示指定-l参数，否则直接退出程序
-            if [ -z "$length_in_char" ]; then
-                echo_color red invert "错误: 指定-t参数之后,必须指定-l参数,比如-l 0或者-l 1"
-                echo_color red invert "注意: 2024年6月及之后的版本只能指定-l值为0否则安装会失败"
-                exit 1
-            else
-                echo_color green bold "使用的length_in_char参数值: $length_in_char"
-                # 判断下length_in_char的值只能是数字0或者数字1
-                if [ "$length_in_char" != "0" ] && [ "$length_in_char" != "1" ]; then
-                    echo_color red invert "错误: length_in_char参数值只能是数字0或者数字1"
-                    exit 1
-                fi
-            fi
-            # 检查文件后缀
-            if [[ "$target_version" == *.iso ]]; then
-                echo_color yellow bold "检测到ISO文件，准备挂载..."
-                # 执行挂载命令
-                if mount -o loop "$target_version" /mnt; then
-                    echo_color green bold "ISO文件已成功挂载到/mnt"
-                    cp /mnt/DMInstall.bin $dm_root_dir/
-                    umount /mnt
-                else
-                    echo_color red invert "错误: 挂载ISO文件失败"
-                    exit 1
-                fi
-            elif [[ "$target_version" == *.bin ]]; then
-                echo_color yellow bold "检测到BIN文件，准备移动..."
-                # 执行移动命令
-                if mv "$target_version" "$dm_root_dir/DMInstall.bin"; then
-                    echo_color green bold "BIN文件已成功移动到 $dm_root_dir/DMInstall.bin"
-                else
-                    echo_color red invert "错误: 移动BIN文件失败"
-                    exit 1
-                fi
-            else
-                echo_color red invert "错误: 不支持的文件格式: $target_version"
-                exit 1
-            fi
-        else
-            echo_color red invert "错误: 文件不存在或不是常规文件: $target_version"
-            exit 1
-        fi
-    fi
+# 安装阶段统一失败出口；不对旧的数据库配置流程启用全局 set -e。
+function die() {
+    echo "错误: $*" >&2
+    exit 1
+}
 
-    # 检查数据库数据目录部分 没有指定-d参数，设置数据库默认数据目录
-    if [ -z "$dm_data_dir" ]; then
-        dm_data_dir=$dm_data_dir_default
-    else
-        # 检查路径结尾是否包含斜杠
-        if [[ "$dm_data_dir" == */ ]]; then
-            echo_color red invert "错误: 数据目录路径 '$dm_data_dir' 不规范，结尾不能包含斜杠" >&2
-            exit 1
+function cleanup_install() {
+    if [ -n "${iso_mount:-}" ]; then
+        if ! umount "$iso_mount"; then
+            echo "警告: 无法卸载 $iso_mount，保留临时目录 $run_dir" >&2
+            return
         fi
-        # 检查数据目录是否存在
-        if [ -d "$dm_data_dir" ]; then
-            echo_color green bold "使用的数据目录路径: $dm_data_dir"
-        else
-            echo_color red invert "错误: 数据目录 '$dm_data_dir' 不存在"
-            exit 1
-        fi
+        iso_mount=""
     fi
+    [ -z "${run_dir:-}" ] || rm -rf -- "$run_dir"
+}
 
-    # 检查数据库备份目录部分 没有指定-b参数，设置数据库默认备份目录
-    if [ -z "$dm_backup_root_dir" ]; then
-        dm_backup_root_dir=$dm_backup_dir_default
-    else
-        # 检查路径结尾是否包含斜杠
-        if [[ "$dm_backup_root_dir" == */ ]]; then
-            echo_color red invert "错误: 备份目录路径 '$dm_backup_root_dir' 不规范，结尾不能包含斜杠" >&2
-            exit 1
-        fi
-        # 检查备份目录是否存在
-        if [ -d "$dm_backup_root_dir" ]; then
-        echo_color green bold "使用的备份目录路径: $dm_backup_root_dir"
-        else
-        echo_color red invert "错误: 备份目录 '$dm_backup_root_dir' 不存在"
-        exit 1
-        fi
-    fi
-    dm_backup_physical_dir="$dm_backup_root_dir/physical"  # 物理备份目录
-    dm_backup_logical_dir="$dm_backup_root_dir/logical"    # 逻辑备份目录
-
-    # 检查指定的端口部分 如果dm_run_port为空，即没有指定参数-p,端口号，就使用默认端口号5236
-    if [ -z "$dm_run_port" ]; then
-    dm_run_port=$dm_port_default
-    fi
-    # 检查dm_run_port是否为纯数字
-    if ! [[ "$dm_run_port" =~ ^[0-9]+$ ]]; then
-        echo_color red invert "错误: 指定的端口号 '$dm_run_port' 不是有效的数字" >&2
-        echo_color red invert "请使用 -p 参数指定有效的数字端口号" >&2
-        exit 1
-    fi
-
-    # 检查数据库兼容参数部分 设置数据库兼容模式
-    case "$dm_compatible_mode" in
-        "oracle_mode")
-            # 如果指定为oracle_mode或未指定参数，默认使用oracle兼容模式
-            dm_run_compatible_mode=2
-            ;;
-        "mysql_mode"|"")
-            # 如果指定为mysql_mode或未指定参数，默认使用mysql兼容模式
-            dm_run_compatible_mode=4
-            ;;
-        *)
-            # 未知的兼容模式，默认使用mysql兼容模式
-            echo_color red invert "错误: 未知的兼容模式 '$dm_compatible_mode',请指定oracle_mode或mysql_mode"
-            exit 1
-            ;;
+function normalize_dir() {
+    local path="$1"
+    [[ "$path" == /* ]] || die "目录必须为绝对路径: $path"
+    # 后续 SQL/cron 使用这些路径，拒绝不能安全表示的字符。
+    [[ "$path" =~ ^/[a-zA-Z0-9_./-]+$ ]] || die "目录仅支持字母、数字、下划线、点、短横线及斜杠: $path"
+    path=$(realpath -m -- "$path") || die "无法解析目录: $path"
+    case "$path" in
+        /|/bin|/sbin|/lib|/lib64|/usr|/usr/*|/etc|/etc/*|/boot|/boot/*|/dev|/dev/*|/proc|/proc/*|/sys|/sys/*|/root|/root/*|/home|/home/dmdba|/home/dmdba/dmdbms|/home/dmdba/dmdbms/*|/var|/opt|/tmp)
+            die "不能使用系统目录: $path" ;;
     esac
+    printf '%s\n' "$path"
+}
+
+function check_bin_arguments() {
+    [[ "$(uname -s)" == Linux ]] || die "安装仅支持 Linux"
+    [ "$(id -u)" -eq 0 ] || die "请以 root 用户执行安装"
+    local cmd
+    for cmd in realpath getent id groupadd useradd usermod mkdir chmod chown stat find mktemp runuser mount umount cp tar tail awk tee pgrep ss namei findmnt grep sed rm date df base64 sudo crontab tr ls; do
+        command -v "$cmd" >/dev/null 2>&1 || die "缺少依赖命令: $cmd"
+    done
+    dm_data_dir=$(normalize_dir "${dm_data_dir:-$dm_data_dir_default}") || exit 1
+    dm_backup_root_dir=$(normalize_dir "${dm_backup_root_dir:-$dm_backup_dir_default}") || exit 1
+    case "$dm_data_dir/" in "$dm_root_dir/"*|"$dm_backup_root_dir/"*) die "数据目录不能位于工作目录或备份目录内" ;; esac
+    case "$dm_backup_root_dir/" in "$dm_root_dir/"*|"$dm_data_dir/"*) die "备份目录不能位于工作目录或数据目录内" ;; esac
+    dm_backup_physical_dir="$dm_backup_root_dir/physical"
+    dm_backup_logical_dir="$dm_backup_root_dir/logical"
+    dm_run_port=${dm_run_port:-$dm_port_default}
+    [[ "$dm_run_port" =~ ^[0-9]{1,5}$ ]] || die "端口必须为 1–65535 的整数"
+    dm_run_port=$((10#$dm_run_port))
+    (( dm_run_port >= 1 && dm_run_port <= 65535 )) || die "端口必须为 1–65535 的整数"
+    [ -z "${length_in_char:-}" ] || [[ "$length_in_char" == 0 || "$length_in_char" == 1 ]] || die "-l 只能为 0 或 1"
+    case "${dm_compatible_mode:-}" in
+        oracle_mode) dm_run_compatible_mode=2 ;;
+        mysql_mode|"") dm_run_compatible_mode=4 ;;
+        *) die "兼容模式必须为 oracle_mode 或 mysql_mode" ;;
+    esac
+    if [ -n "${target_version:-}" ]; then
+        [ -f "$target_version" ] && [ -r "$target_version" ] || die "安装包不存在或不可读: $target_version"
+        [ -n "${length_in_char:-}" ] || die "指定 -t 时必须指定 -l 0 或 -l 1"
+        target_version=$(realpath -- "$target_version") || die "安装包路径解析失败"
+        case "$target_version" in *.iso|*.bin) ;; *) die "安装包仅支持 .iso 或 .bin" ;; esac
+    fi
+}
+
+# 这是本安装流程的支持限制；不自动更改 SELinux 模式或策略。
+function check_selinux() {
+    local state mounts mount_status enforce_file=/sys/fs/selinux/enforce
+    if command -v getenforce >/dev/null 2>&1; then
+        state=$(LC_ALL=C getenforce) || die "无法读取 SELinux 状态，请检查 getenforce"
+    else
+        mounts=$(findmnt -rn -t selinuxfs -o TARGET)
+        mount_status=$?
+        if [ "$mount_status" -gt 1 ]; then
+            die "无法检查 SELinux 文件系统挂载状态"
+        fi
+        if [ "$mount_status" -eq 1 ] && [ -z "$mounts" ]; then
+            state=Disabled
+        elif [ "$mount_status" -eq 0 ] && [ -n "$mounts" ] && [[ "$mounts" != *$'\n'* ]]; then
+            # 兼容 selinuxfs 挂载到非默认位置；不把缺失或不可读当作 Disabled。
+            [ "$mounts" = /sys/fs/selinux ] || enforce_file="$mounts/enforce"
+            [ -r "$enforce_file" ] || die "无法读取 SELinux 状态文件: $enforce_file"
+            state=$(< "$enforce_file") || die "读取 SELinux 状态文件失败: $enforce_file"
+            case "$state" in
+                1) state=Enforcing ;;
+                0) state=Permissive ;;
+                *) die "SELinux 状态文件内容异常: $enforce_file" ;;
+            esac
+        else
+            die "SELinux 文件系统挂载状态异常"
+        fi
+    fi
+    case "$state" in
+        Enforcing)
+            die "当前安装流程不支持 SELinux 强制模式，可能导致服务启动失败；请先由管理员处理 SELinux 兼容性（即使已配置允许规则，本脚本仍会退出）"
+            ;;
+        Permissive)
+            echo "警告: SELinux 为 Permissive；恢复强制模式前需验证服务策略" >&2
+            ;;
+        Disabled) ;;
+        *) die "未知 SELinux 状态: $state" ;;
+    esac
+}
+
+function check_existing_install() {
+    local path found sockets
+    if pgrep -x dmserver >/dev/null; then die "检测到运行中的 dmserver，停止安装"; fi
+    for path in "$dm_data_dir" /data/DAMENG; do
+        [ ! -e "$path" ] || {
+            found=$(find "$path" -type f \( -name dm.ini -o -name '*.dbf' -o -name dm.ctl \) -print -quit) || die "无法检查已有数据: $path"
+            [ -z "$found" ] || die "发现已有数据库文件: ${found}；不覆盖或迁移"
+        }
+    done
+    path=/home/dmdba/dmdbms
+    if [ -e "$path" ]; then
+        [ -d "$path" ] || die "程序路径不是目录: $path"
+        found=$(find "$path" -mindepth 1 -maxdepth 1 -print -quit) || die "无法检查 $path"
+        [ -z "$found" ] || die "程序目录非空: ${path}；请先核实上次安装结果"
+    fi
+    sockets=$(ss -H -ltn) || die "无法检查端口占用"
+    if awk -v port="$dm_run_port" '$4 ~ (":" port "$") {found=1} END {exit !found}' <<< "$sockets"; then
+        die "端口 $dm_run_port 已被占用"
+    fi
+}
+
+function directory_diagnostics() {
+    ls -ld -- "$1" >&2
+    namei -l -- "$1" >&2
+    findmnt -T "$1" >&2
+}
+
+function prepare_data_dir() {
+    local path="$dm_data_dir" owner entries
+    if [ -e "$path" ]; then
+        [ -d "$path" ] || die "数据路径不是目录: $path"
+        owner=$(stat -c %u -- "$path") || die "无法读取目录属主"
+        entries=$(find "$path" -mindepth 1 -maxdepth 1 -print -quit) || die "无法检查目录内容"
+        if [ -n "$entries" ] && [ "$owner" != "$(id -u dmdba)" ]; then
+            die "已有非空目录不属于 dmdba: ${path}；请指定独立数据目录"
+        fi
+    else
+        (umask 022; mkdir -p -- "$path") || die "创建数据目录失败: $path"
+        chmod 750 "$path" || die "设置目录权限失败: $path"
+    fi
+    if ! chown dmdba:dinstall -- "$path" || ! chmod u+rwx "$path"; then
+        directory_diagnostics "$path"
+        die "无法设置数据目录权限: $path"
+    fi
+    if ! runuser -u dmdba -- /bin/bash -c 'f=$(mktemp "$1/.dm-write-check.XXXXXX") || exit 1; rm -- "$f"' _ "$path"; then
+        directory_diagnostics "$path"
+        die "dmdba 无法在数据目录创建或删除文件: $path"
+    fi
+    (umask 022; mkdir -p -- "$dm_backup_root_dir") || die "创建备份目录失败"
+}
+
+function prepare_installer() {
+    (umask 022; mkdir -p -- "$dm_root_dir") || die "创建安装工作目录失败"
+    run_dir=$(mktemp -d "$dm_root_dir/.install.XXXXXX") || die "创建独立临时目录失败"
+    trap cleanup_install EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    installer="$run_dir/DMInstall.bin"
+    if [ -n "${target_version:-}" ]; then
+        case "$target_version" in
+            *.iso)
+                mkdir "$run_dir/iso" || die "创建挂载点失败"
+                mount -o loop,ro "$target_version" "$run_dir/iso" || die "ISO 挂载失败"
+                iso_mount="$run_dir/iso"
+                [ -f "$iso_mount/DMInstall.bin" ] || die "ISO 内缺少 DMInstall.bin"
+                cp -- "$iso_mount/DMInstall.bin" "$installer" || die "复制 ISO 安装器失败"
+                umount "$iso_mount" || die "卸载 ISO 失败"
+                iso_mount=""
+                ;;
+            *.bin) cp -- "$target_version" "$installer" || die "复制 BIN 安装器失败" ;;
+        esac
+    else
+        unzipfile
+    fi
+    [ -s "$installer" ] || die "安装器为空"
+    chmod 700 "$installer" || die "设置安装器权限失败"
 }
 
 function init_env()
 {
-# 如果没有指定-t参数，即没有指定特定安装包
-if [ -z "$target_version" ]; then
-# 统一安装包名称
-if ! mv $dm_root_dir/DMInstall_*.bin $dm_root_dir/DMInstall.bin; then
-    echo_color red invert "错误: 未找到达梦安装包 DMInstall_*.bin，请检查安装包是否完整"
-    exit 1
-fi
-fi
-
 # 检查用户组是否存在，避免使用黑名单命令 groupadd
-if grep -q '^dinstall:' /etc/group; then
+if getent group dinstall >/dev/null; then
     echo_color yellow bold "警告: dinstall 用户组已存在，跳过创建"
     # read -p "按 Enter 键继续..."
 else
-    groupadd dinstall
+    groupadd dinstall || die "创建 dinstall 用户组失败"
 fi
 
 # 检查用户是否存在
@@ -209,6 +250,8 @@ if ! id -u dmdba >/dev/null 2>&1; then
 else
     echo_color yellow bold "dmdba 用户已存在，跳过创建"
 fi
+
+id -nG dmdba | tr " " "\n" | grep -qx dinstall || usermod -a -G dinstall dmdba || die "无法添加 dinstall 附加组"
 
 # 配置资源限制，避免重复添加
 LIMITS_FILE="/etc/security/limits.conf"
@@ -225,7 +268,7 @@ limits_conf=("dmdba soft nproc 10240"
 
 for limit in "${limits_conf[@]}"; do
     if ! grep -qxF "$limit" "$LIMITS_FILE"; then
-        echo "$limit" >> "$LIMITS_FILE"
+        echo "$limit" >> "$LIMITS_FILE" || die "写入资源限制失败"
         echo_color green bold "添加资源限制: $limit"
     else
         echo_color yellow bold "资源限制已存在: $limit"
@@ -233,10 +276,7 @@ for limit in "${limits_conf[@]}"; do
  done
 
 export LANG=en_US
-chown dmdba:dinstall $dm_root_dir/DMInstall.bin
-chmod +x $dm_root_dir/DMInstall.bin
-# 创建达梦数据文件目录，此处不对$dm_data_dir递归授权，避免影响该目录下其他应用的数据
-mkdir -p $dm_data_dir
+prepare_data_dir
 }
 
 function init_xml()
@@ -247,7 +287,7 @@ if [ "$length_in_char" = "0" ]; then
     col_length_in_char=""
 fi
 # 输出XML内容到dminstall.xml文件
-cat > $dm_root_dir/dminstall.xml << EOF
+cat > "$run_dir/dminstall.xml" << EOF
 <?xml version="1.0"?>
 <DATABASE>
 
@@ -336,32 +376,27 @@ $col_length_in_char
 </DATABASE>
 EOF
 
-# 检查文件是否成功创建
-if [ -f $dm_root_dir/dminstall.xml ]; then
-    echo_color green bold "dminstall.xml 文件已成功生成。"
-else
-    echo_color red invert "生成 dminstall.xml 文件时出错。"
-fi
+[ $? -eq 0 ] || die "写入安装 XML 失败"
+chmod 600 "$run_dir/dminstall.xml" || die "设置 XML 权限失败"
+echo_color green bold "dminstall.xml 文件已成功生成。"
 }
 
-function unzipfile()
-{
-    # 不为空判断，即指定了-t参数，就直接返回，不运行解压
-    if [ ! -z "$target_version" ]; then
-    echo "你指定了自定义安装包 $target_version"
-    return 1
-    fi
-    split_num=`cat -n $0  | grep --text  '\---------ARCHIVE_FOLLOWS---------'| grep -v "split_num" |awk '{printf $1}' `
-    tail -n  +$(($split_num+1)) $0  > ${installfilepath}/${INSTALL_TAG_GZ}.tar.gz
-    # 执行解压命令
-    if ! tar -zxvf "${installfilepath}/${INSTALL_TAG_GZ}.tar.gz" -C "${dm_untar_dir}"; then
-        echo_color red invert "tar ${INSTALL_TAG_GZ}.tar.gz failed"
-        exit 1
-    fi
+function unzipfile() {
+    local marker member
+    marker=$(LC_ALL=C awk '/^---------ARCHIVE_FOLLOWS---------$/ {print NR; exit}' "$0")
+    [ -n "$marker" ] || die "内置归档标记不存在"
+    tail -n "+$((marker + 1))" "$0" > "$run_dir/payload.tar.gz" || die "提取内置归档失败"
+    tar -tzf "$run_dir/payload.tar.gz" > "$run_dir/members" || die "内置归档损坏或缺失"
+    local candidates=()
+    while IFS= read -r member; do
+        case "$member" in
+            dm_all_in_one/DMInstall_*.bin) candidates+=("$member") ;;
+        esac
+    done < "$run_dir/members"
+    [ "${#candidates[@]}" -eq 1 ] || die "内置安装器必须唯一，找到 ${#candidates[@]} 个"
+    # 只导出安装器内容，不按归档路径解压，避免覆盖现有文件。
+    tar -xOzf "$run_dir/payload.tar.gz" "${candidates[0]}" > "$installer" || die "提取安装器失败"
 }
-#OS_Version=$(cat /etc/redhat-release | awk '{$NF="";print}')
-
-
 function check_dm_run()
 {
     # 检查达梦数据库进程是否在运行
@@ -384,28 +419,26 @@ function install_dm()
     # 执行数据库安装命令
     echo_color blue bold "开始安装达梦数据库..."
 
-    # 指定 DMInstall.bin 安装过程使用的临时目录，避免使用空间不足的系统 /tmp
-    mkdir -p $dm_install_tmpdir
-    chown -R dmdba:dinstall $dm_install_tmpdir
-    export DM_INSTALL_TMPDIR=$dm_install_tmpdir
-
-    sh $dm_root_dir/DMInstall.bin -q $dm_root_dir/dminstall.xml
-
-    # 检查安装是否成功
-    if [ $? -ne 0 ]; then
-        echo_color red bold "数据库安装失败!"
-        echo_color red "请检查安装日志或参数配置后重试"
-        exit 1
-    else
-        echo_color green bold "数据库安装成功"
+    mkdir -p "$run_dir/tmp" || die "创建安装临时目录失败"
+    chown root:dinstall "$run_dir" || die "设置工作目录属组失败"
+    chmod 750 "$run_dir" || die "设置工作目录权限失败"
+    chown dmdba:dinstall "$run_dir/tmp" || die "设置安装临时目录属主失败"
+    chmod 700 "$run_dir/tmp" || die "设置安装临时目录权限失败"
+    runuser -u dmdba -- test -x "$run_dir/tmp" || die "dmdba 无法进入安装临时目录: $run_dir/tmp"
+    export DM_INSTALL_TMPDIR="$run_dir/tmp"
+    install_log=$(mktemp "$dm_root_dir/install-$(date +%Y%m%d-%H%M%S).XXXXXX.log") || die "创建安装日志失败"
+    chmod 600 "$install_log" || die "设置日志权限失败"
+    echo "安装日志: $install_log"
+    sh "$installer" -q "$run_dir/dminstall.xml" 2>&1 | tee "$install_log"
+    local statuses=("${PIPESTATUS[@]}")
+    if [ "${statuses[0]}" -ne 0 ]; then
+        echo "数据库安装失败，退出码 ${statuses[0]}；日志: $install_log" >&2
+        directory_diagnostics "$dm_data_dir"
+        exit "${statuses[0]}"
     fi
+    [ "${statuses[1]}" -eq 0 ] || die "安装日志写入失败: $install_log"
+    echo_color green bold "数据库安装成功"
 
-    # 只对达梦自己创建的数据库子目录授权，不影响$dm_data_dir下的其他兄弟目录
-    if [ -d "$dm_data_dir/DAMENG" ]; then
-        chown -R dmdba:dinstall $dm_data_dir/DAMENG
-    else
-        echo_color yellow bold "警告: 未找到 $dm_data_dir/DAMENG 目录，跳过属主修正"
-    fi
 }
 
 
@@ -1078,12 +1111,12 @@ do
         echo -en "you can use follow options: \n"\
              "-p [default 5236]  set the dm port; \n"\
              "-m [default mysql] set the dm_compatible_mode mysql_mode or oracle_mode; \n"\
-             "-d [default /data] set the dm data directory; \n"\
+             "-d [default /data/dmdb] set the dm data directory; \n"\
              "-b [default /dm_backup] set the dm backup directory; \n"\
              "-t install  dm specified version; \n"\
              "-l install dm specified length_in_char,like -l 0 then do not enable length_in_char ; \n"\
              "-h Help \n"
-        exit 1
+        exit 0
         ;;
     ?)
         echo -en "unknow args,you can use '-h' show all options \n"
@@ -1095,12 +1128,18 @@ done
 #   echo "you must specified -t argument ,example -t /opt/DMInstall.bin"
 #   exit 1
 # fi
+shift "$((OPTIND - 1))"
+[ "$#" -eq 0 ] || die "不支持的位置参数: $*"
 check_bin_arguments
+check_selinux
+check_existing_install
+original_umask=$(umask)
+umask 077
 print_info
-check_dm_run
-unzipfile
-init_xml
+prepare_installer
 init_env
+init_xml
+umask "$original_umask"
 install_dm
 check_install
 add_run_env

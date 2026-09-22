@@ -4,7 +4,7 @@
 * 安装支持指定版本，指定端口，数据目录，备份目录，数据库兼容模式，length_in_char参数
 * 安装前会自动检测达梦实例进程(`dmserver`)是否在运行，如有自动退出安装，如果`/home/dmdba/dmdbms/bin/dmserver`存在也会自动退出安装
 * 自动修改/etc/security/limits.conf文件，增加达梦用户的资源限制
-* 自动创建达梦用户以及用户组,默认数据目录/data/DAMENG目录，归档目录/data/arch
+* 自动创建达梦用户以及用户组,默认数据目录/data/dmdb/DAMENG目录，归档目录/data/dmdb/arch
 * 自动创建物理备份任务，周六01点开始全备，其余每天01点开始增量备份），备份在/dm_backup/physical
 * 自动创建逻辑备份任务，每晚20点执行逻辑备份,备份在/dm_backup/logical
 * 自动生成SYSDBA随机密码
@@ -50,19 +50,19 @@ make -f Makefile-arm
 you can use follow options: 
  -p [default 5236]  set the dm port; 默认端口5236，可指定自定义端口
  -m [default mysql] set the dm_compatible_mode mysql_mode or oracle_mode; 默认数据库兼容模式为mysql，可指定为oracle_mode
- -d [default /data] set the dm data directory; 默认数据目录为/data，可指定自定义数据目录
+ -d [default /data/dmdb] set the dm data directory; 默认数据目录为/data/dmdb，可指定自定义数据目录
  -b [default /dm_backup] set the dm backup directory; 默认备份目录为/dm_backup，可指定自定义备份目录
  -t install dm specified version; 默认安装bin包本身的数据库程序，可指定安装其他版本的安装包
  -l install dm specified length_in_char,like -l 0 then do not enable length_in_char ; 默认安装时length_in_char=1，可指定为0
  -h Help 
 ```
 
-如果不指定任何参数，默认安装bin包本身的数据库程序，安装后默认端口5236，数据目录为/data，备份目录为/dm_backup，数据库兼容模式为mysql,length_in_char=1，例如:
+如果不指定任何参数，默认安装bin包本身的数据库程序，安装后默认端口5236，数据目录为/data/dmdb，备份目录为/dm_backup，数据库兼容模式为mysql,length_in_char=1，例如:
 ```bash
 sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin
 ```
 
-如果要安装特定版本的安装包，使用-t参数后面指定iso或者bin结尾的安装包文件，安装后默认端口5236，数据目录为/data，备份目录为/dm_backup，数据库兼容模式为mysql,length_in_char=0，例如:
+如果要安装特定版本的安装包，使用-t参数后面指定iso或者bin结尾的安装包文件，安装后默认端口5236，数据目录为/data/dmdb，备份目录为/dm_backup，数据库兼容模式为mysql,length_in_char=0，例如:
 ```bash
 sh dm_arm_20231226_INSTALL_2025-07-30_11-12-15.bin -t dm8_20250423_HWarm920_kylin10_sp1_64.iso -l 0
 或者
@@ -147,7 +147,7 @@ Extract install files.........
 检查达梦数据库进程状态...
 达梦数据库进程正在运行
 进程详情:
-dmdba      4227      1 15 11:09 ?        00:00:02 /home/dmdba/dmdbms/bin/dmserver path=/data/DAMENG/dm.ini -noconsole
+dmdba      4227      1 15 11:09 ?        00:00:02 /home/dmdba/dmdbms/bin/dmserver path=/data/dmdb/DAMENG/dm.ini -noconsole
 
 
 
@@ -279,3 +279,27 @@ remove_bak          enable SYSDBA   2025-08-29 14:31:07
 ##########################################################################
 
 ```
+
+
+## 安装前检查与权限
+
+请在 Linux 上以 root 执行；`-h` 仅显示帮助，不创建目录。默认数据根目录为 `/data/dmdb`，`-d` 指定的路径直接作为数据根目录，不追加子目录。数据和备份目录可自动创建，必须使用绝对路径；路径只接受字母、数字、下划线、点、短横线和斜杠。
+
+脚本仅授权数据目录本身，不递归更改 `/data` 或兄弟目录。新建数据目录权限为 750，属主为 dmdba:dinstall；已有非空目录必须属于 dmdba。安装前会以 dmdba 创建并删除临时文件，失败时输出目录、父路径及挂载信息。不要通过递归授权整个共享磁盘解决权限问题。
+
+检测到运行中的 dmserver、已有数据库文件、非空 `/home/dmdba/dmdbms` 或端口占用时停止。旧 `/data/DAMENG` 不会自动迁移；失败重试前先核实日志和残留程序，不要删除已有数据库。
+
+自定义 BIN 使用复制，原安装包保留；ISO 在独立目录只读挂载。安装日志保存在 `/opt/dm_all_in_one/install-*.log`，权限为 600；安装 XML 同样限制访问，并随本次临时目录清理。安装器失败时保留其退出码，不执行后续配置。卸载失败时保留挂载点并提示人工处理。
+
+脚本修改后需要通过原有 x86/ARM Makefile 重新打包，已有 `TargetBin` 安装包不会自动更新。真实安装需在 Linux 测试机验收。
+
+### SELinux 安装前检查
+
+参数校验完成后、已有安装检查之前，脚本检查 SELinux 状态。此时尚未创建安装目录、挂载 ISO 或修改用户和权限：
+
+- `Enforcing`：以退出码 1 停止，提示“当前安装流程不支持 SELinux 强制模式，可能导致服务启动失败；请先由管理员处理 SELinux 兼容性”。即使配置了允许规则也会退出，这是当前脚本的支持限制，并非所有 Enforcing 环境都无法安装达梦。
+- `Permissive`：允许继续，并提示恢复强制模式前需验证服务策略。
+- `Disabled`：允许继续。
+- `getenforce` 不存在时，通过 `findmnt` 检查 selinuxfs 挂载并读取其 `enforce` 文件（默认 `/sys/fs/selinux/enforce`）；1 表示 Enforcing，0 表示 Permissive。未挂载表示未启用；读取失败、检测失败或状态异常均退出。
+
+脚本不会自动关闭 SELinux、修改文件标签或策略，也未新增命令行参数。`-h` 不触发此检查。此修改不修复已有的未完成安装；部署新版脚本仍须重新打包，已有 BIN 不会自动更新。
